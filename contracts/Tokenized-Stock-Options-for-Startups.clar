@@ -50,6 +50,35 @@
   { amount: uint }
 )
 
+(define-map company-valuations
+  { company-id: uint, timestamp: uint }
+  {
+    share-price: uint,
+    total-valuation: uint,
+    updated-by: principal,
+    volatility: uint
+  }
+)
+
+(define-map current-market-prices
+  { company-id: uint }
+  {
+    current-price: uint,
+    last-updated: uint,
+    updated-by: principal
+  }
+)
+
+(define-map option-fair-values
+  { token-id: uint }
+  {
+    black-scholes-value: uint,
+    intrinsic-value: uint,
+    time-value: uint,
+    calculated-at: uint
+  }
+)
+
 (define-public (register-company (name (string-ascii 64)) (symbol (string-ascii 10)) (total-shares uint))
   (let
     (
@@ -168,6 +197,62 @@
   )
 )
 
+(define-public (update-market-price (company-id uint) (new-price uint) (volatility uint))
+  (let
+    (
+      (current-block stacks-block-height)
+      (company (unwrap! (map-get? companies { company-id: company-id }) err-invalid-company))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (map-set current-market-prices
+      { company-id: company-id }
+      {
+        current-price: new-price,
+        last-updated: current-block,
+        updated-by: tx-sender
+      }
+    )
+    (map-set company-valuations
+      { company-id: company-id, timestamp: current-block }
+      {
+        share-price: new-price,
+        total-valuation: (* new-price (get total-shares company)),
+        updated-by: tx-sender,
+        volatility: volatility
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (calculate-option-fair-value (token-id uint))
+  (let
+    (
+      (option (unwrap! (map-get? option-details { token-id: token-id }) err-invalid-token))
+      (market-price-data (unwrap! (map-get? current-market-prices { company-id: (get company-id option) }) err-invalid-company))
+      (current-price (get current-price market-price-data))
+      (strike-price (get strike-price option))
+      (current-block stacks-block-height)
+      (intrinsic (if (> current-price strike-price) (- current-price strike-price) u0))
+      (time-to-expiry (if (> (+ (get vesting-start option) (get vesting-duration option)) current-block)
+                        (- (+ (get vesting-start option) (get vesting-duration option)) current-block)
+                        u1))
+      (time-value (/ (* intrinsic time-to-expiry) u100))
+      (fair-value (+ intrinsic time-value))
+    )
+    (map-set option-fair-values
+      { token-id: token-id }
+      {
+        black-scholes-value: fair-value,
+        intrinsic-value: intrinsic,
+        time-value: time-value,
+        calculated-at: current-block
+      }
+    )
+    (ok fair-value)
+  )
+)
+
 (define-read-only (get-company-counter)
   (default-to u0 (get value (map-get? company-counter { dummy: true })))
 )
@@ -220,5 +305,84 @@
 
 (define-read-only (get-total-supply)
   (ok (var-get last-token-id))
+)
+
+(define-read-only (get-market-price (company-id uint))
+  (map-get? current-market-prices { company-id: company-id })
+)
+
+(define-read-only (get-company-valuation (company-id uint) (timestamp uint))
+  (map-get? company-valuations { company-id: company-id, timestamp: timestamp })
+)
+
+(define-read-only (get-option-fair-value (token-id uint))
+  (map-get? option-fair-values { token-id: token-id })
+)
+
+(define-read-only (get-option-intrinsic-value (token-id uint))
+  (let
+    (
+      (option (unwrap! (map-get? option-details { token-id: token-id }) u0))
+      (market-price-data (map-get? current-market-prices { company-id: (get company-id option) }))
+    )
+    (match market-price-data
+      price-data
+        (let
+          (
+            (current-price (get current-price price-data))
+            (strike-price (get strike-price option))
+          )
+          (if (> current-price strike-price)
+            (- current-price strike-price)
+            u0
+          )
+        )
+      u0
+    )
+  )
+)
+
+(define-read-only (get-portfolio-value (holder principal))
+  (let
+    (
+      (token-count (var-get last-token-id))
+    )
+    (fold calculate-holder-portfolio-value
+      (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20)
+      { holder: holder, total-value: u0, current-token: u1 }
+    )
+  )
+)
+
+(define-private (calculate-holder-portfolio-value 
+  (token-id uint)
+  (acc { holder: principal, total-value: uint, current-token: uint })
+  )
+  (let
+    (
+      (option-data (map-get? option-details { token-id: (get current-token acc) }))
+      (next-token (+ (get current-token acc) u1))
+    )
+    (match option-data
+      option
+        (if (is-eq (get holder option) (get holder acc))
+          {
+            holder: (get holder acc),
+            total-value: (+ (get total-value acc) (get-option-intrinsic-value (get current-token acc))),
+            current-token: next-token
+          }
+          {
+            holder: (get holder acc),
+            total-value: (get total-value acc),
+            current-token: next-token
+          }
+        )
+      {
+        holder: (get holder acc),
+        total-value: (get total-value acc),
+        current-token: next-token
+      }
+    )
+  )
 )
 
