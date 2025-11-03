@@ -9,6 +9,8 @@
 (define-constant err-already-exercised (err u105))
 (define-constant err-invalid-token (err u106))
 (define-constant err-transfer-not-allowed (err u107))
+(define-constant err-pool-exhausted (err u108))
+(define-constant err-invalid-pool-size (err u109))
 
 (define-data-var last-token-id uint u0)
 
@@ -24,6 +26,15 @@
 )
 
 (define-map company-counter { dummy: bool } { value: uint })
+
+(define-map option-pools
+  { company-id: uint }
+  {
+    total-allocation: uint,
+    allocated: uint,
+    reserved: uint,
+    last-updated: uint
+  })
 
 (define-map option-details
   { token-id: uint }
@@ -79,12 +90,13 @@
   }
 )
 
-(define-public (register-company (name (string-ascii 64)) (symbol (string-ascii 10)) (total-shares uint))
+(define-public (register-company (name (string-ascii 64)) (symbol (string-ascii 10)) (total-shares uint) (option-pool-allocation uint))
   (let
     (
       (company-id (+ (get-company-counter) u1))
       (current-block stacks-block-height)
     )
+    (asserts! (<= option-pool-allocation total-shares) err-invalid-pool-size)
     (map-set company-counter { dummy: true } { value: company-id })
     (map-set companies
       { company-id: company-id }
@@ -99,6 +111,15 @@
     (map-set company-admins
       { admin: tx-sender, company-id: company-id }
       { authorized: true }
+    )
+    (map-set option-pools
+      { company-id: company-id }
+      {
+        total-allocation: option-pool-allocation,
+        allocated: u0,
+        reserved: u0,
+        last-updated: current-block
+      }
     )
     (ok company-id)
   )
@@ -117,8 +138,11 @@
       (token-id (+ (var-get last-token-id) u1))
       (current-block stacks-block-height)
       (company (unwrap! (map-get? companies { company-id: company-id }) err-invalid-company))
+      (pool (unwrap! (map-get? option-pools { company-id: company-id }) err-invalid-company))
+      (new-allocated (+ (get allocated pool) shares))
     )
     (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (<= new-allocated (get total-allocation pool)) err-pool-exhausted)
     (try! (nft-mint? stock-option token-id recipient))
     (var-set last-token-id token-id)
     (map-set option-details
@@ -134,6 +158,10 @@
         exercised: false,
         created-at: current-block
       }
+    )
+    (map-set option-pools
+      { company-id: company-id }
+      (merge pool { allocated: new-allocated, last-updated: current-block })
     )
     (ok token-id)
   )
@@ -317,6 +345,62 @@
 
 (define-read-only (get-option-fair-value (token-id uint))
   (map-get? option-fair-values { token-id: token-id })
+)
+
+(define-read-only (get-option-pool (company-id uint))
+  (map-get? option-pools { company-id: company-id })
+)
+
+(define-public (reserve-option-shares (company-id uint) (shares uint))
+  (let
+    (
+      (current-block stacks-block-height)
+      (pool (unwrap! (map-get? option-pools { company-id: company-id }) err-invalid-company))
+      (total-committed (+ (get allocated pool) (get reserved pool) shares))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (<= total-committed (get total-allocation pool)) err-pool-exhausted)
+    (map-set option-pools
+      { company-id: company-id }
+      (merge pool { reserved: (+ (get reserved pool) shares), last-updated: current-block })
+    )
+    (ok true)
+  )
+)
+
+(define-public (release-option-reserve (company-id uint) (shares uint))
+  (let
+    (
+      (current-block stacks-block-height)
+      (pool (unwrap! (map-get? option-pools { company-id: company-id }) err-invalid-company))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (>= (get reserved pool) shares) err-invalid-pool-size)
+    (map-set option-pools
+      { company-id: company-id }
+      (merge pool { reserved: (- (get reserved pool) shares), last-updated: current-block })
+    )
+    (ok true)
+  )
+)
+
+(define-public (update-option-pool-allocation (company-id uint) (new-allocation uint))
+  (let
+    (
+      (current-block stacks-block-height)
+      (pool (unwrap! (map-get? option-pools { company-id: company-id }) err-invalid-company))
+      (company (unwrap! (map-get? companies { company-id: company-id }) err-invalid-company))
+      (current-usage (+ (get allocated pool) (get reserved pool)))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (>= new-allocation current-usage) err-invalid-pool-size)
+    (asserts! (<= new-allocation (get total-shares company)) err-invalid-pool-size)
+    (map-set option-pools
+      { company-id: company-id }
+      (merge pool { total-allocation: new-allocation, last-updated: current-block })
+    )
+    (ok true)
+  )
 )
 
 (define-read-only (get-option-intrinsic-value (token-id uint))
