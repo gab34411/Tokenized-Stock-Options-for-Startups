@@ -11,6 +11,8 @@
 (define-constant err-transfer-not-allowed (err u107))
 (define-constant err-pool-exhausted (err u108))
 (define-constant err-invalid-pool-size (err u109))
+(define-constant err-already-accelerated (err u110))
+(define-constant err-invalid-percentage (err u111))
 
 (define-data-var last-token-id uint u0)
 
@@ -87,6 +89,16 @@
     intrinsic-value: uint,
     time-value: uint,
     calculated-at: uint
+  }
+)
+
+(define-map vesting-accelerations
+  { token-id: uint }
+  {
+    acceleration-percentage: uint,
+    reason: (string-ascii 64),
+    accelerated-by: principal,
+    accelerated-at: uint
   }
 )
 
@@ -278,6 +290,61 @@
       }
     )
     (ok fair-value)
+  )
+)
+
+(define-public (accelerate-vesting (token-id uint) (acceleration-percentage uint) (reason (string-ascii 64)))
+  (let
+    (
+      (option (unwrap! (map-get? option-details { token-id: token-id }) err-invalid-token))
+      (company-id (get company-id option))
+      (current-block stacks-block-height)
+      (existing-acceleration (map-get? vesting-accelerations { token-id: token-id }))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (is-none existing-acceleration) err-already-accelerated)
+    (asserts! (and (> acceleration-percentage u0) (<= acceleration-percentage u100)) err-invalid-percentage)
+    (asserts! (not (get exercised option)) err-already-exercised)
+    (map-set vesting-accelerations
+      { token-id: token-id }
+      {
+        acceleration-percentage: acceleration-percentage,
+        reason: reason,
+        accelerated-by: tx-sender,
+        accelerated-at: current-block
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-vesting-acceleration (token-id uint))
+  (map-get? vesting-accelerations { token-id: token-id })
+)
+
+(define-read-only (get-accelerated-vested-amount (token-id uint))
+  (let
+    (
+      (base-vested (get-vested-amount token-id))
+      (option (unwrap! (map-get? option-details { token-id: token-id }) u0))
+      (total-shares (get shares option))
+      (acceleration (map-get? vesting-accelerations { token-id: token-id }))
+    )
+    (match acceleration
+      accel
+        (let
+          (
+            (acceleration-pct (get acceleration-percentage accel))
+            (accelerated-shares (/ (* total-shares acceleration-pct) u100))
+            (combined (+ base-vested accelerated-shares))
+          )
+          (if (> combined total-shares)
+            total-shares
+            combined
+          )
+        )
+      base-vested
+    )
   )
 )
 
