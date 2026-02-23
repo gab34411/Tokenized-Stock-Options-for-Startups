@@ -13,6 +13,7 @@
 (define-constant err-invalid-pool-size (err u109))
 (define-constant err-already-accelerated (err u110))
 (define-constant err-invalid-percentage (err u111))
+(define-constant err-already-forfeited (err u112))
 
 (define-data-var last-token-id uint u0)
 
@@ -99,6 +100,17 @@
     reason: (string-ascii 64),
     accelerated-by: principal,
     accelerated-at: uint
+  }
+)
+
+(define-map option-forfeitures
+  { token-id: uint }
+  {
+    forfeited-shares: uint,
+    reclaimed-shares: uint,
+    reason: (string-ascii 64),
+    forfeited-by: principal,
+    forfeited-at: uint
   }
 )
 
@@ -468,6 +480,53 @@
     )
     (ok true)
   )
+)
+
+(define-public (forfeit-option (token-id uint) (reason (string-ascii 64)))
+  (let
+    (
+      (option (unwrap! (map-get? option-details { token-id: token-id }) err-invalid-token))
+      (company-id (get company-id option))
+      (current-block stacks-block-height)
+      (pool (unwrap! (map-get? option-pools { company-id: company-id }) err-invalid-company))
+      (total-shares (get shares option))
+      (vested (get-accelerated-vested-amount token-id))
+      (unvested (- total-shares vested))
+    )
+    (asserts! (is-company-admin tx-sender company-id) err-owner-only)
+    (asserts! (not (get exercised option)) err-already-exercised)
+    (asserts! (is-none (map-get? option-forfeitures { token-id: token-id })) err-already-forfeited)
+    (map-set option-details
+      { token-id: token-id }
+      (merge option { exercised: true, shares: vested })
+    )
+    (map-set option-pools
+      { company-id: company-id }
+      (merge pool {
+        allocated: (- (get allocated pool) unvested),
+        last-updated: current-block
+      })
+    )
+    (map-set option-forfeitures
+      { token-id: token-id }
+      {
+        forfeited-shares: total-shares,
+        reclaimed-shares: unvested,
+        reason: reason,
+        forfeited-by: tx-sender,
+        forfeited-at: current-block
+      }
+    )
+    (ok { vested: vested, forfeited: unvested })
+  )
+)
+
+(define-read-only (get-option-forfeiture (token-id uint))
+  (map-get? option-forfeitures { token-id: token-id })
+)
+
+(define-read-only (is-option-forfeited (token-id uint))
+  (is-some (map-get? option-forfeitures { token-id: token-id }))
 )
 
 (define-read-only (get-option-intrinsic-value (token-id uint))
